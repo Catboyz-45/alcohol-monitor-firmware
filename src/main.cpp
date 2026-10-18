@@ -3,12 +3,20 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <Wire.h>
 
 #include "secrets.h"
+
+// ส่งผลวัดเข้า Firebase Realtime Database (แอปไม่ได้อ่านส่วนนี้ ใช้ Firestore แทน)
+// ปิดไว้เป็นค่าเริ่มต้น เพราะต้องเปิด RTDB rules ให้เขียนได้โดยไม่ล็อกอิน
+// และ HTTPS แบบ blocking ทำให้ loop ค้าง เปิดได้ด้วย build flag -D ENABLE_FIREBASE_RTDB=1
+#ifndef ENABLE_FIREBASE_RTDB
+#define ENABLE_FIREBASE_RTDB 0
+#endif
 
 const char *mqttServer = "mqtt.netpie.io";
 const int mqttPort = 1883;
@@ -31,6 +39,9 @@ const uint8_t OLED_ADDR = 0x3C;
 
 const unsigned long SENSOR_READ_INTERVAL_MS = 1000; // อ่านเซ็นเซอร์ทุก 1 วินาที
 const unsigned long DISPLAY_HOLD_MS = 2500; // แสดงค่าที่วัดได้ 2.5 วินาที ก่อนกลับไปหน้ารอวัดใหม่
+const unsigned long HEARTBEAT_INTERVAL_MS = 5000; // ส่งสถานะให้แอปอย่างน้อยทุก 5 วินาที แม้ไม่มีการเป่า
+const unsigned long MQTT_RETRY_INTERVAL_MS = 5000; // ลองต่อ MQTT ใหม่ทุก 5 วินาทีโดยไม่บล็อก loop
+const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 const float MIN_REPORT_BAC = 10.0f;
 const float BAC_MAX_VALUE = 100.0f;
 
@@ -42,11 +53,14 @@ int lastRawValue = 0;
 int alertLevel = 0;
 unsigned long lastSensorReadAt = 0;
 unsigned long lastDisplayValueAt = 0;
+unsigned long lastStatusPublishAt = 0;
+unsigned long lastMqttAttemptAt = 0;
 bool displayReady = false;
 bool displayHoldingValue = false;
 
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
+Preferences preferences;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // จำกัดค่า BAC ให้อยู่ในช่วงที่ระบบรองรับ
@@ -76,6 +90,22 @@ void normalizeThresholds() {
     threshold1 = threshold2;
     threshold2 = temp;
   }
+}
+
+// โหลด threshold ที่แอปเคยตั้งไว้ ไม่ให้รีเซ็ตเป็น 20/50 ทุกครั้งที่บอร์ดรีบูต
+void loadThresholds() {
+  preferences.begin("alcohol", true);
+  threshold1 = preferences.getFloat("t1", threshold1);
+  threshold2 = preferences.getFloat("t2", threshold2);
+  preferences.end();
+  normalizeThresholds();
+}
+
+void saveThresholds() {
+  preferences.begin("alcohol", false);
+  preferences.putFloat("t1", threshold1);
+  preferences.putFloat("t2", threshold2);
+  preferences.end();
 }
 
 // อ่านค่าเซ็นเซอร์หลายครั้งแล้วเฉลี่ย เพื่อลดสัญญาณรบกวน
@@ -161,8 +191,12 @@ void publishShadow() {
   data["yellow"] = led1State;
   data["led1"] = led1State;
   data["bac"] = roundOneDecimal(lastBacValue);
+  data["raw"] = lastRawValue;
+  data["alertLevel"] = alertLevel;
   data["threshold1"] = roundOneDecimal(threshold1);
   data["threshold2"] = roundOneDecimal(threshold2);
+  // แอปใช้ค่านี้ดูว่า shadow ยังอัปเดตอยู่ (บอร์ดออนไลน์) หรือเป็นค่าค้าง
+  data["uptime"] = millis();
 
   char payload[384];
   serializeJson(doc, payload, sizeof(payload));
@@ -171,12 +205,14 @@ void publishShadow() {
   Serial.println(ok ? "OK" : "FAIL");
 }
 
-// ส่งข้อมูลการวัดไปยัง topic สถานะและ topic BAC
-void publishMeasurement() {
+// ส่งข้อมูลการวัดไปยัง topic สถานะ และ topic BAC เมื่อเป็นการเป่าจริง
+// includeBac = false ใช้เป็น heartbeat ให้แอปรู้ว่าบอร์ดยังออนไลน์
+void publishMeasurement(bool includeBac) {
   if (!mqttClient.connected()) {
     Serial.println("MQTT publish skipped: MQTT disconnected");
     return;
   }
+  lastStatusPublishAt = millis();
 
   StaticJsonDocument<256> doc;
   doc["bac"] = roundOneDecimal(lastBacValue);
@@ -189,6 +225,9 @@ void publishMeasurement() {
   char payload[256];
   serializeJson(doc, payload, sizeof(payload));
   const bool okStatus = mqttClient.publish(topic_pub, payload);
+  if (!includeBac) {
+    return;
+  }
   const bool okBac = mqttClient.publish(topic_pub_bac, payload);
   Serial.print("MQTT publish status/bac: ");
   Serial.print(okStatus ? "OK" : "FAIL");
@@ -198,6 +237,7 @@ void publishMeasurement() {
 
 // ส่งค่าการวัดไปเก็บใน Firebase Realtime Database
 void sendToFirebase() {
+#if ENABLE_FIREBASE_RTDB
   // ส่งเฉพาะตอนต่อ WiFi ได้เท่านั้น
   if (WiFi.status() != WL_CONNECTED) {
     return;
@@ -213,6 +253,7 @@ void sendToFirebase() {
     return;
   }
 
+  https.setTimeout(3000);
   https.addHeader("Content-Type", "application/json");
 
   StaticJsonDocument<256> doc;
@@ -229,25 +270,27 @@ void sendToFirebase() {
   Serial.print("Firebase HTTP code: ");
   Serial.println(httpCode);
   https.end();
+#endif
 }
 
 // รับค่า threshold ใหม่จาก JSON และบังคับให้ค่าถูกต้องก่อนใช้งาน
 void applyThresholdUpdate(JsonObjectConst source) {
   bool updated = false;
 
-  if (source.containsKey("threshold1")) {
+  // รับเฉพาะค่าที่เป็นตัวเลข กันค่าแปลก ๆ กลายเป็น 0 แล้วไฟเตือนติดตลอด
+  if (source["threshold1"].is<float>()) {
     threshold1 = source["threshold1"].as<float>();
     updated = true;
   }
-  if (source.containsKey("threshold2")) {
+  if (source["threshold2"].is<float>()) {
     threshold2 = source["threshold2"].as<float>();
     updated = true;
   }
-  if (source.containsKey("level1")) {
+  if (source["level1"].is<float>()) {
     threshold1 = source["level1"].as<float>();
     updated = true;
   }
-  if (source.containsKey("level2")) {
+  if (source["level2"].is<float>()) {
     threshold2 = source["level2"].as<float>();
     updated = true;
   }
@@ -257,8 +300,11 @@ void applyThresholdUpdate(JsonObjectConst source) {
   }
 
   normalizeThresholds();
+  saveThresholds();
   updateAlertOutputs(lastBacValue);
   publishShadow();
+  // ส่งสถานะทันที เพื่อให้แอปยืนยันได้ว่าบอร์ดรับค่าใหม่แล้ว
+  publishMeasurement(false);
   renderDisplay(lastDisplayedBac, displayHoldingValue);
 
   Serial.print("Threshold updated: ");
@@ -295,37 +341,52 @@ void callback(char *topic, byte *payload, unsigned int length) {
   applyThresholdUpdate(source);
 }
 
-// เชื่อมต่อ WiFi และรอจนกว่าจะสำเร็จ
+// เชื่อมต่อ WiFi โดยรอไม่เกิน WIFI_CONNECT_TIMEOUT_MS
+// ถ้ายังต่อไม่ได้ก็ทำงานต่อ (อ่านเซนเซอร์/ไฟเตือนยังใช้ได้) และให้ ESP32 ต่อใหม่เอง
 void setupWifi() {
   delay(10);
   Serial.print("Connecting to ");
   Serial.println(Secrets::WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(Secrets::WIFI_SSID, Secrets::WIFI_PASSWORD);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  const unsigned long startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
     delay(500);
     Serial.print(".");
   }
 
-  Serial.println("\nWiFi connected");
+  Serial.println(WiFi.status() == WL_CONNECTED
+                     ? "\nWiFi connected"
+                     : "\nWiFi not connected yet, continuing offline");
 }
 
-// พยายามเชื่อม MQTT ใหม่จนกว่าจะสำเร็จ
+// ลองเชื่อม MQTT ใหม่ทีละครั้งตามรอบเวลา ไม่วนรอจนบอร์ดค้าง
+// (เดิมวน while + delay ทำให้ไฟเตือนบนบอร์ดหยุดทำงานตอนเน็ตหลุด)
 void reconnectMQTT() {
-  while (!mqttClient.connected()) {
-    Serial.println("Attempting MQTT connection...");
-    if (mqttClient.connect(
-            Secrets::MQTT_CLIENT_ID,
-            Secrets::MQTT_USERNAME,
-            Secrets::MQTT_PASSWORD)) {
-      Serial.println("Connected to NetPIE");
-      mqttClient.subscribe(topic_sub);
-      publishShadow();
-    } else {
-      Serial.print("MQTT failed, rc=");
-      Serial.println(mqttClient.state());
-      delay(5000);
-    }
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  const unsigned long now = millis();
+  if (lastMqttAttemptAt != 0 && now - lastMqttAttemptAt < MQTT_RETRY_INTERVAL_MS) {
+    return;
+  }
+  lastMqttAttemptAt = now;
+
+  Serial.println("Attempting MQTT connection...");
+  if (mqttClient.connect(
+          Secrets::MQTT_CLIENT_ID,
+          Secrets::MQTT_USERNAME,
+          Secrets::MQTT_PASSWORD)) {
+    Serial.println("Connected to NetPIE");
+    mqttClient.subscribe(topic_sub);
+    publishShadow();
+    publishMeasurement(false);
+  } else {
+    Serial.print("MQTT failed, rc=");
+    Serial.println(mqttClient.state());
   }
 }
 
@@ -355,7 +416,7 @@ void setup() {
 
   analogReadResolution(12);
   analogSetPinAttenuation(MQ3_PIN, ADC_11db);
-  normalizeThresholds();
+  loadThresholds();
 
   setupDisplay();
   setupWifi();
@@ -367,7 +428,7 @@ void setup() {
 
 // วนลูปหลัก: ดูแลการเชื่อมต่อ, อ่านเซ็นเซอร์, อัปเดตแจ้งเตือน, และส่งข้อมูล
 void loop() {
-  // ถ้าหลุด MQTT ให้เชื่อมใหม่ก่อนทำงานต่อ
+  // ถ้าหลุด MQTT ให้ลองเชื่อมใหม่ แต่ยังอ่านเซนเซอร์และคุมไฟเตือนต่อไป
   if (!mqttClient.connected()) {
     reconnectMQTT();
   }
@@ -392,8 +453,10 @@ void loop() {
       lastDisplayValueAt = now;
       displayHoldingValue = true;
       renderDisplay(lastDisplayedBac, true);
-      publishMeasurement();
+      publishMeasurement(true);
       sendToFirebase();
+    } else if (now - lastStatusPublishAt >= HEARTBEAT_INTERVAL_MS) {
+      publishMeasurement(false);
     }
   }
 

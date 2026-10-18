@@ -8,7 +8,7 @@ Firmware สำหรับระบบตรวจวัดแอลกอฮ�
 
 Alcohol Monitor Firmware อ่านค่าสัญญาณแอนะล็อกจากเซนเซอร์ MQ-3 ด้วย ESP32 จากนั้นเฉลี่ยตัวอย่างเพื่อลดสัญญาณรบกวน แปลงค่าเป็นสเกล 0–100 และเปรียบเทียบกับ Threshold สองระดับเพื่อควบคุมไฟแจ้งเตือน
 
-อุปกรณ์ส่งค่า BAC จำลอง ค่าดิบ ระดับแจ้งเตือน และ Threshold ไปยัง NETPIE ผ่าน MQTT รวมถึงบันทึกค่าที่เกินเกณฑ์ขั้นต่ำไปยัง Firebase Realtime Database แอป Flutter ที่ใช้ดูข้อมูลและตั้งค่าอุปกรณ์แยกอยู่ใน [alcohol-monitor-app](https://github.com/Catboyz-45/alcohol-monitor-app)
+อุปกรณ์ส่งค่าที่วัดได้ ค่าดิบ ระดับแจ้งเตือน และ Threshold ไปยัง NETPIE ผ่าน MQTT และส่ง heartbeat ทุก 5 วินาทีเพื่อให้แอปรู้ว่าบอร์ดยังออนไลน์ แอป Flutter ที่ใช้บันทึกผลตรวจและตั้งค่าอุปกรณ์แยกอยู่ใน [alcohol-monitor-app](https://github.com/Catboyz-45/alcohol-monitor-app)
 
 ## ความสามารถหลัก
 
@@ -19,11 +19,13 @@ Alcohol Monitor Firmware อ่านค่าสัญญาณแอนะล�
 - ควบคุม LED สองดวงตามระดับแจ้งเตือน
 - แสดงค่าล่าสุดและ Threshold บนจอ OLED SSD1306
 - เชื่อมต่อ Wi-Fi และ NETPIE MQTT
-- ส่งข้อมูลไปยัง NETPIE Message และ Device Shadow
-- รับ Threshold ใหม่ในรูปแบบ JSON ผ่าน MQTT
+- ส่งข้อมูลไปยัง NETPIE Message และ Device Shadow (มี `uptime` ให้แอปตรวจว่าข้อมูลยังสดอยู่)
+- ส่ง heartbeat ไปที่ `@msg/home/device_status` ทุก 5 วินาที แม้ไม่มีการเป่า
+- รับ Threshold ใหม่ในรูปแบบ JSON ผ่าน MQTT (รับเฉพาะค่าที่เป็นตัวเลข) แล้วตอบสถานะกลับทันที
 - ตรวจสอบและเรียงค่าให้ `threshold1 <= threshold2`
-- ส่งรายการวัดที่เกินค่าขั้นต่ำไปยัง Firebase Realtime Database
-- เชื่อมต่อ MQTT ใหม่อัตโนมัติเมื่อการเชื่อมต่อหลุด
+- เก็บ Threshold ไว้ใน flash (NVS) ค่าไม่หายเมื่อรีบูต
+- เชื่อมต่อ Wi-Fi/MQTT ใหม่อัตโนมัติแบบไม่บล็อก ทำให้ไฟเตือนบนบอร์ดยังทำงานตอนเน็ตหลุด
+- ส่งผลวัดไป Firebase Realtime Database ได้ (ปิดไว้เป็นค่าเริ่มต้น ดูหัวข้อด้านล่าง)
 - แยก Wi-Fi, NETPIE credentials และ Firebase URL ออกจาก source code
 
 ## เทคโนโลยีและอุปกรณ์
@@ -58,9 +60,9 @@ Alcohol Monitor Firmware อ่านค่าสัญญาณแอนะล�
 | ทิศทาง | Topic | หน้าที่ |
 | --- | --- | --- |
 | Subscribe | `@msg/home/device_control` | รับค่า Threshold จากแอป |
-| Publish | `@msg/home/device_status` | ส่งสถานะอุปกรณ์และผลวัด |
-| Publish | `@msg/home/bac` | ส่งผลวัดสำหรับหน้าติดตาม |
-| Publish | `@shadow/data/update` | อัปเดต NETPIE Device Shadow |
+| Publish | `@msg/home/device_status` | ส่งผลวัดเมื่อมีการเป่า (> 10) และส่ง heartbeat ทุก 5 วินาที |
+| Publish | `@msg/home/bac` | ส่งผลวัดเฉพาะตอนมีการเป่า |
+| Publish | `@shadow/data/update` | อัปเดต NETPIE Device Shadow ทุก 1 วินาที |
 
 ตัวอย่างคำสั่งปรับ Threshold:
 
@@ -71,7 +73,7 @@ Alcohol Monitor Firmware อ่านค่าสัญญาณแอนะล�
 }
 ```
 
-ตัวอย่างข้อมูลที่อุปกรณ์ส่ง:
+ตัวอย่างข้อมูลที่อุปกรณ์ส่งไปที่ `@msg/home/device_status`:
 
 ```json
 {
@@ -82,6 +84,34 @@ Alcohol Monitor Firmware อ่านค่าสัญญาณแอนะล�
   "alertLevel": 1,
   "millis": 120000
 }
+```
+
+ข้อมูลใน Device Shadow:
+
+```json
+{
+  "data": {
+    "bac": 32.5,
+    "raw": 1331,
+    "alertLevel": 1,
+    "threshold1": 20,
+    "threshold2": 50,
+    "uptime": 120000,
+    "red": 0,
+    "yellow": 1,
+    "led1": 1
+  }
+}
+```
+
+`alertLevel` คือ 0 (ปลอดภัย), 1 (≥ threshold1) หรือ 2 (≥ threshold2) ถ้าจะเปลี่ยนชื่อ field หรือ topic ต้องแก้ `lib/device_reading.dart` ในแอปให้ตรงกันด้วย
+
+### Firebase Realtime Database (ไม่บังคับ)
+
+แอปเก็บประวัติใน Cloud Firestore และไม่ได้อ่านข้อมูลจาก Realtime Database ส่วนนี้จึงปิดไว้เป็นค่าเริ่มต้น เพราะต้องเปิด rules ให้เขียนได้โดยไม่ต้องล็อกอิน และ HTTPS แบบ blocking ทำให้ loop ช้า ถ้าต้องการเปิด ให้เพิ่มใน `platformio.ini`:
+
+```ini
+build_flags = -D ENABLE_FIREBASE_RTDB=1
 ```
 
 ## โครงสร้างโปรเจกต์
@@ -142,11 +172,8 @@ pio device monitor --baud 115200
 pio run
 ```
 
-สถานะการตรวจล่าสุด:
+ทุก PR จะ build firmware ผ่าน GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) ทั้งแบบปิดและเปิด Firebase RTDB
 
-- `pio run` — ผ่าน
-- RAM usage — 14.5% (47,648 จาก 327,680 bytes)
-- Flash usage — 73.6% (964,757 จาก 1,310,720 bytes)
 
 ## สิ่งที่ได้เรียนรู้
 
@@ -170,8 +197,6 @@ pio run
 - เพิ่มสูตรสอบเทียบ MQ-3 จากข้อมูลการทดลองจริง
 - ใช้ MQTT ผ่าน TLS พร้อมตรวจสอบ CA certificate
 - ตรวจสอบ Firebase TLS certificate แทน `setInsecure()`
-- เพิ่ม timeout และ backoff สำหรับ Wi-Fi/MQTT reconnect
-- เพิ่ม acknowledgment หลังอัปเดต Threshold
 - เพิ่ม watchdog และสถานะข้อผิดพลาดบน OLED
 - เพิ่ม unit tests สำหรับการแปลงค่าและการจัดลำดับ Threshold
 - เพิ่มการจัดเก็บค่าชั่วคราวเมื่ออินเทอร์เน็ตขาด
