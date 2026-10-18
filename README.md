@@ -19,8 +19,8 @@ Alcohol Monitor Firmware อ่านค่าสัญญาณแอนะล�
 - ควบคุม LED สองดวงตามระดับแจ้งเตือน
 - แสดงค่าล่าสุดและ Threshold บนจอ OLED SSD1306
 - เชื่อมต่อ Wi-Fi และ NETPIE MQTT
-- ส่งข้อมูลไปยัง NETPIE Message และ Device Shadow (มี `uptime` ให้แอปตรวจว่าข้อมูลยังสดอยู่)
-- ส่ง heartbeat ไปที่ `@msg/home/device_status` ทุก 5 วินาที แม้ไม่มีการเป่า
+- ส่งข้อมูลไปยัง NETPIE Message และ Device Shadow
+- ส่ง heartbeat ไปที่ `@msg/home/device_status` ทุก 5 วินาที แม้ไม่มีการเป่า และตอบทันทีเมื่อแอปส่ง ping
 - รับ Threshold ใหม่ในรูปแบบ JSON ผ่าน MQTT (รับเฉพาะค่าที่เป็นตัวเลข) แล้วตอบสถานะกลับทันที
 - ตรวจสอบและเรียงค่าให้ `threshold1 <= threshold2`
 - เก็บ Threshold ไว้ใน flash (NVS) ค่าไม่หายเมื่อรีบูต
@@ -59,10 +59,9 @@ Alcohol Monitor Firmware อ่านค่าสัญญาณแอนะล�
 
 | ทิศทาง | Topic | หน้าที่ |
 | --- | --- | --- |
-| Subscribe | `@msg/home/device_control` | รับค่า Threshold จากแอป |
+| Subscribe | `@msg/home/device_control` | รับ Threshold หรือ `{"ping": 1}` จากแอป |
 | Publish | `@msg/home/device_status` | ส่งผลวัดเมื่อมีการเป่า (> 10) และส่ง heartbeat ทุก 5 วินาที |
-| Publish | `@msg/home/bac` | ส่งผลวัดเฉพาะตอนมีการเป่า |
-| Publish | `@shadow/data/update` | อัปเดต NETPIE Device Shadow ทุก 1 วินาที |
+| Publish | `@shadow/data/update` | อัปเดต NETPIE Device Shadow ทุก 1 วินาที (สำหรับ dashboard ของ NETPIE แอปไม่ได้อ่าน) |
 
 ตัวอย่างคำสั่งปรับ Threshold:
 
@@ -96,10 +95,8 @@ Alcohol Monitor Firmware อ่านค่าสัญญาณแอนะล�
     "alertLevel": 1,
     "threshold1": 20,
     "threshold2": 50,
-    "uptime": 120000,
     "red": 0,
-    "yellow": 1,
-    "led1": 1
+    "yellow": 1
   }
 }
 ```

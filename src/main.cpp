@@ -23,7 +23,6 @@ const int mqttPort = 1883;
 
 const char *topic_sub = "@msg/home/device_control";
 const char *topic_pub = "@msg/home/device_status";
-const char *topic_pub_bac = "@msg/home/bac";
 const char *data_pub = "@shadow/data/update";
 
 const int OLED_SDA = 21;
@@ -189,14 +188,11 @@ void publishShadow() {
   JsonObject data = doc.createNestedObject("data");
   data["red"] = led2State;
   data["yellow"] = led1State;
-  data["led1"] = led1State;
   data["bac"] = roundOneDecimal(lastBacValue);
   data["raw"] = lastRawValue;
   data["alertLevel"] = alertLevel;
   data["threshold1"] = roundOneDecimal(threshold1);
   data["threshold2"] = roundOneDecimal(threshold2);
-  // แอปใช้ค่านี้ดูว่า shadow ยังอัปเดตอยู่ (บอร์ดออนไลน์) หรือเป็นค่าค้าง
-  data["uptime"] = millis();
 
   char payload[384];
   serializeJson(doc, payload, sizeof(payload));
@@ -205,9 +201,9 @@ void publishShadow() {
   Serial.println(ok ? "OK" : "FAIL");
 }
 
-// ส่งข้อมูลการวัดไปยัง topic สถานะ และ topic BAC เมื่อเป็นการเป่าจริง
-// includeBac = false ใช้เป็น heartbeat ให้แอปรู้ว่าบอร์ดยังออนไลน์
-void publishMeasurement(bool includeBac) {
+// ส่งผลวัดและสถานะไปที่ @msg/home/device_status ให้แอป
+// ใช้ทั้งตอนมีการเป่า, heartbeat ทุก HEARTBEAT_INTERVAL_MS และตอบ ping จากแอป
+void publishStatus() {
   if (!mqttClient.connected()) {
     Serial.println("MQTT publish skipped: MQTT disconnected");
     return;
@@ -224,15 +220,9 @@ void publishMeasurement(bool includeBac) {
 
   char payload[256];
   serializeJson(doc, payload, sizeof(payload));
-  const bool okStatus = mqttClient.publish(topic_pub, payload);
-  if (!includeBac) {
-    return;
+  if (!mqttClient.publish(topic_pub, payload)) {
+    Serial.println("MQTT status publish: FAIL");
   }
-  const bool okBac = mqttClient.publish(topic_pub_bac, payload);
-  Serial.print("MQTT publish status/bac: ");
-  Serial.print(okStatus ? "OK" : "FAIL");
-  Serial.print(" / ");
-  Serial.println(okBac ? "OK" : "FAIL");
 }
 
 // ส่งค่าการวัดไปเก็บใน Firebase Realtime Database
@@ -286,14 +276,6 @@ void applyThresholdUpdate(JsonObjectConst source) {
     threshold2 = source["threshold2"].as<float>();
     updated = true;
   }
-  if (source["level1"].is<float>()) {
-    threshold1 = source["level1"].as<float>();
-    updated = true;
-  }
-  if (source["level2"].is<float>()) {
-    threshold2 = source["level2"].as<float>();
-    updated = true;
-  }
 
   if (!updated) {
     return;
@@ -304,7 +286,7 @@ void applyThresholdUpdate(JsonObjectConst source) {
   updateAlertOutputs(lastBacValue);
   publishShadow();
   // ส่งสถานะทันที เพื่อให้แอปยืนยันได้ว่าบอร์ดรับค่าใหม่แล้ว
-  publishMeasurement(false);
+  publishStatus();
   renderDisplay(lastDisplayedBac, displayHoldingValue);
 
   Serial.print("Threshold updated: ");
@@ -336,6 +318,11 @@ void callback(char *topic, byte *payload, unsigned int length) {
   JsonObjectConst source = doc.as<JsonObjectConst>();
   if (doc["data"].is<JsonObjectConst>()) {
     source = doc["data"].as<JsonObjectConst>();
+  }
+
+  // แอปส่ง {"ping": 1} ตอนเชื่อมต่อ เพื่อขอสถานะทันทีโดยไม่ต้องรอ heartbeat
+  if (source.containsKey("ping")) {
+    publishStatus();
   }
 
   applyThresholdUpdate(source);
@@ -383,7 +370,7 @@ void reconnectMQTT() {
     Serial.println("Connected to NetPIE");
     mqttClient.subscribe(topic_sub);
     publishShadow();
-    publishMeasurement(false);
+    publishStatus();
   } else {
     Serial.print("MQTT failed, rc=");
     Serial.println(mqttClient.state());
@@ -453,10 +440,10 @@ void loop() {
       lastDisplayValueAt = now;
       displayHoldingValue = true;
       renderDisplay(lastDisplayedBac, true);
-      publishMeasurement(true);
+      publishStatus();
       sendToFirebase();
     } else if (now - lastStatusPublishAt >= HEARTBEAT_INTERVAL_MS) {
-      publishMeasurement(false);
+      publishStatus();
     }
   }
 
