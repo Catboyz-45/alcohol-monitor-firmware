@@ -1,0 +1,27 @@
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install --upgrade platformio
+      # ใช้ค่าตัวอย่างแทน secrets จริง เพื่อตรวจว่า compile ผ่าน
+      - run: cp include/secrets.example.h include/secrets.h
+      - run: pio run
+      - name: Build with Firebase RTDB enabled
+        run: PLATFORMIO_BUILD_FLAGS="-D ENABLE_FIREBASE_RTDB=1" pio run
