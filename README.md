@@ -187,13 +187,11 @@ pio run
 
 โปรเจกต์นี้เป็นต้นแบบเพื่อการศึกษา ไม่ใช่อุปกรณ์ตรวจวัดแอลกอฮอล์ที่ผ่านการรับรองทางการแพทย์หรือกฎหมาย ค่า `bac` ในโค้ดเป็นการแปลงค่าดิบ ADC ไปยังสเกล 0–100 แบบเชิงเส้น ไม่ใช่ค่า BAC ทางกฎหมาย และต้องสอบเทียบกับอุปกรณ์มาตรฐานก่อนใช้อ้างอิง
 
-การเชื่อมต่อ MQTT ปัจจุบันใช้พอร์ต 1883 และการเชื่อมต่อ Firebase ใช้ `setInsecure()` จึงยังไม่มีการตรวจสอบ TLS certificate อย่างสมบูรณ์ ก่อนใช้จริงควรเปลี่ยนเป็นการเชื่อมต่อ TLS ที่ตรวจสอบ certificate, กำหนด Firebase Security Rules, เพิ่ม timeout สำหรับการเชื่อมต่อ และย้ายงานสำคัญไปยัง trusted backend
+การเชื่อมต่อ MQTT ใช้ TLS พอร์ต 8883 และทั้ง MQTT กับ Firebase ตรวจสอบ certificate ของเซิร์ฟเวอร์ด้วย Root CA ใน [`include/ca_certs.h`](include/ca_certs.h) (USERTrust RSA / Sectigo R46 สำหรับ NETPIE และ GTS Root R1 / GlobalSign สำหรับ Firebase) ถ้าผู้ให้บริการเปลี่ยน CA ต้องอัปเดตไฟล์นี้แล้วแฟลชใหม่ ดูสาเหตุได้จากบรรทัด `TLS error:` ใน Serial Monitor ก่อนใช้จริงควรกำหนด Firebase Security Rules และย้ายงานสำคัญไปยัง trusted backend
 
 ## แนวทางพัฒนาต่อ
 
 - เพิ่มสูตรสอบเทียบ MQ-3 จากข้อมูลการทดลองจริง
-- ใช้ MQTT ผ่าน TLS พร้อมตรวจสอบ CA certificate
-- ตรวจสอบ Firebase TLS certificate แทน `setInsecure()`
 - เพิ่ม watchdog และสถานะข้อผิดพลาดบน OLED
 - เพิ่ม unit tests สำหรับการแปลงค่าและการจัดลำดับ Threshold
 - เพิ่มการจัดเก็บค่าชั่วคราวเมื่ออินเทอร์เน็ตขาด

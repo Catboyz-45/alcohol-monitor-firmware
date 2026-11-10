@@ -9,6 +9,7 @@
 #include <WiFiClientSecure.h>
 #include <Wire.h>
 
+#include "ca_certs.h"
 #include "secrets.h"
 
 // ส่งผลวัดเข้า Firebase Realtime Database (แอปไม่ได้อ่านส่วนนี้ ใช้ Firestore แทน)
@@ -19,7 +20,8 @@
 #endif
 
 const char *mqttServer = "mqtt.netpie.io";
-const int mqttPort = 1883;
+// MQTT ผ่าน TLS และตรวจ certificate ของ NETPIE (เดิมใช้ 1883 ซึ่งส่ง token และข้อมูลแบบไม่เข้ารหัส)
+const int mqttPort = 8883;
 
 const char *topic_sub = "@msg/home/device_control";
 const char *topic_pub = "@msg/home/device_status";
@@ -41,6 +43,7 @@ const unsigned long DISPLAY_HOLD_MS = 2500; // แสดงค่าที่ว
 const unsigned long HEARTBEAT_INTERVAL_MS = 5000; // ส่งสถานะให้แอปอย่างน้อยทุก 5 วินาที แม้ไม่มีการเป่า
 const unsigned long MQTT_RETRY_INTERVAL_MS = 5000; // ลองต่อ MQTT ใหม่ทุก 5 วินาทีโดยไม่บล็อก loop
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
+const unsigned long TLS_HANDSHAKE_TIMEOUT_S = 10; // กัน loop ค้างนานตอนเน็ตช้า
 const float MIN_REPORT_BAC = 10.0f;
 const float BAC_MAX_VALUE = 100.0f;
 
@@ -57,8 +60,8 @@ unsigned long lastMqttAttemptAt = 0;
 bool displayReady = false;
 bool displayHoldingValue = false;
 
-WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
+WiFiClientSecure mqttSecureClient;
+PubSubClient mqttClient(mqttSecureClient);
 Preferences preferences;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
@@ -234,7 +237,8 @@ void sendToFirebase() {
   }
 
   WiFiClientSecure secureClient;
-  secureClient.setInsecure();
+  secureClient.setCACert(GOOGLE_ROOT_CA);
+  secureClient.setHandshakeTimeout(TLS_HANDSHAKE_TIMEOUT_S);
 
   HTTPClient https;
   const String url = String(Secrets::FIREBASE_BASE_URL) + "/measurements.json";
@@ -374,6 +378,11 @@ void reconnectMQTT() {
   } else {
     Serial.print("MQTT failed, rc=");
     Serial.println(mqttClient.state());
+    char tlsError[100];
+    if (mqttSecureClient.lastError(tlsError, sizeof(tlsError)) != 0) {
+      Serial.print("TLS error: ");
+      Serial.println(tlsError);
+    }
   }
 }
 
@@ -407,7 +416,11 @@ void setup() {
 
   setupDisplay();
   setupWifi();
+  // ตั้งเวลาจาก NTP ไว้ให้ตรวจวันหมดอายุ certificate ได้ (ทำงานเบื้องหลัง ไม่บล็อก)
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
 
+  mqttSecureClient.setCACert(NETPIE_ROOT_CA);
+  mqttSecureClient.setHandshakeTimeout(TLS_HANDSHAKE_TIMEOUT_S);
   mqttClient.setServer(mqttServer, mqttPort);
   mqttClient.setCallback(callback);
   mqttClient.setBufferSize(512);
